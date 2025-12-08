@@ -1,0 +1,76 @@
+name: GitHub Enterprise Inventory Collection
+
+on:
+    # Manual trigger
+    workflow_dispatch:
+
+jobs:
+    collect-inventory:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+                  cache: "pip"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
+
+            - name: Create .env file
+              run: |
+                  echo "GITHUB_ENTERPRISE_NAME=${{ secrets.ENTERPRISE_NAME }}" >> .env
+                  echo "GITHUB_PATS=${{ secrets.Secret_tokens }}" >> .env
+                  echo "GITHUB_GRAPHQL_URL=https://api.github.com/graphql" >> .env
+                  echo "GITHUB_API_URL=https://api.github.com" >> .env
+                  echo "REPO_CSV_FILE=github_inventory_repositories.csv" >> .env
+                  echo "ORG_CSV_FILE=github_inventory_organizations.csv" >> .env
+
+            - name: Run inventory collection
+              run: python github_inventory.py
+
+            - name: Upload repository inventory CSV
+              uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: github-inventory-repositories-${{ github.run_number }}
+                  path: output/github_inventory_repositories.csv
+                  retention-days: 90
+
+            - name: Upload organization inventory CSV
+              uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: github-inventory-organizations-${{ github.run_number }}
+                  path: output/github_inventory_organizations.csv
+                  retention-days: 90
+
+            - name: Upload logs
+              uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: inventory-logs-${{ github.run_number }}
+                  path: output/logs/
+                  retention-days: 30
+
+            - name: Display summary
+              if: always()
+              run: |
+                  echo "## Inventory Collection Summary" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  if [ -f output/github_inventory_repositories.csv ]; then
+                    repo_count=$(tail -n +2 output/github_inventory_repositories.csv | wc -l)
+                    echo "📦 **Total Repositories:** $repo_count" >> $GITHUB_STEP_SUMMARY
+                  fi
+                  if [ -f output/github_inventory_organizations.csv ]; then
+                    org_count=$(tail -n +2 output/github_inventory_organizations.csv | wc -l)
+                    echo "🏢 **Total Organizations:** $org_count" >> $GITHUB_STEP_SUMMARY
+                  fi
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "✅ Artifacts uploaded successfully!" >> $GITHUB_STEP_SUMMARY
