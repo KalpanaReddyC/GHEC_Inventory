@@ -140,7 +140,7 @@ class GitHubInventoryCollector:
         for attempt in range(max_retries):
             try:
                 response = requests.post(
-                    self.graphql_url, json=payload, headers=headers, timeout=60
+                    self.graphql_url, json=payload, headers=headers, timeout=120  # Increased from 60 to 120 seconds
                 )
 
                 if response.status_code == 200:
@@ -332,11 +332,35 @@ class GitHubInventoryCollector:
                 break
             else:
                 # No data and no errors - unexpected response
+                # Retry with exponential backoff for empty responses
+                if not result and cursor is None:
+                    logging.warning(
+                        f"Empty response on first attempt for {org_login}, retrying..."
+                    )
+                    print(
+                        f"[WARNING] Empty response for {org_login}, retrying in 5 seconds..."
+                    )
+                    time.sleep(5)
+                    # Retry once
+                    result = self.execute_graphql_query(query, variables)
+                    if "data" in result and result["data"]:
+                        repos_data = result["data"]["organization"]["repositories"]
+                        repositories.extend(repos_data["nodes"])
+                        has_next_page = repos_data["pageInfo"]["hasNextPage"]
+                        cursor = repos_data["pageInfo"]["endCursor"]
+                        continue
+                
                 logging.error(
                     f"Unexpected response fetching repos for {org_login}: {result}"
                 )
                 print(
                     f"[ERROR] Unexpected response when fetching repositories for {org_login}"
+                )
+                print(
+                    f"        This might indicate a timeout, network issue, or API problem"
+                )
+                print(
+                    f"        Try running the script again or check the organization name"
                 )
                 break
 
