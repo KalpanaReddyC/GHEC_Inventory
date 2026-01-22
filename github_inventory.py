@@ -244,6 +244,7 @@ class GitHubInventoryCollector:
         """Fetch all repositories for an organization"""
         logging.info(f"Fetching repositories for organization: {org_login}")
         print(f"Fetching repositories for organization: {org_login}")
+        logging.debug(f"Using organization login: '{org_login}'")
 
         query = """
         query($org: String!, $cursor: String) {
@@ -298,13 +299,45 @@ class GitHubInventoryCollector:
             variables = {"org": org_login, "cursor": cursor}
             result = self.execute_graphql_query(query, variables)
 
-            if "data" in result and result["data"] and "organization" in result["data"]:
+            if "data" in result and result["data"]:
+                if result["data"]["organization"] is None:
+                    # Organization not found or no access
+                    logging.error(
+                        f"Organization '{org_login}' not found or access denied"
+                    )
+                    print(
+                        f"[ERROR] Organization '{org_login}' not found or access denied"
+                    )
+                    print(f"        This could happen if:")
+                    print(f"        - The organization login name is incorrect")
+                    print(
+                        f"        - Your PAT doesn't have access to this organization"
+                    )
+                    print(f"        - The organization requires SSO authentication")
+                    break
+
                 repos_data = result["data"]["organization"]["repositories"]
                 repositories.extend(repos_data["nodes"])
 
                 has_next_page = repos_data["pageInfo"]["hasNextPage"]
                 cursor = repos_data["pageInfo"]["endCursor"]
+            elif "errors" in result:
+                # GraphQL returned errors
+                logging.error(
+                    f"GraphQL errors fetching repos for {org_login}: {result['errors']}"
+                )
+                print(f"[ERROR] Failed to fetch repositories for {org_login}")
+                for error in result["errors"]:
+                    print(f"        - {error.get('message', 'Unknown error')}")
+                break
             else:
+                # No data and no errors - unexpected response
+                logging.error(
+                    f"Unexpected response fetching repos for {org_login}: {result}"
+                )
+                print(
+                    f"[ERROR] Unexpected response when fetching repositories for {org_login}"
+                )
                 break
 
             time.sleep(0.5)  # Be nice to the API
@@ -756,9 +789,14 @@ class GitHubInventoryCollector:
                     continue
 
                 org_login = org["login"]
-                logging.info(f"Processing organization {idx}/{total_orgs}: {org_login}")
+                org_name = org.get("name", "N/A")
+                logging.info(
+                    f"Processing organization {idx}/{total_orgs}: {org_login} (Display Name: {org_name})"
+                )
                 print(f"\\n{'='*60}")
                 print(f"Processing Organization: {org_login}")
+                if org_name and org_name != org_login:
+                    print(f"Display Name: {org_name}")
                 print(f"{'='*60}")
 
                 # Get org-level webhooks, GitHub Apps, and teams
