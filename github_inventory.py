@@ -414,6 +414,77 @@ class GitHubInventoryCollector:
 
         return 0
 
+    def get_repository_lfs_usage(self, owner: str, repo_name: str) -> str:
+        """Check if repo has LFS-tracked files and return the tracked patterns"""
+        token = self.pat_manager.get_current_token()
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        try:
+            attr_url = f"{self.api_url}/repos/{owner}/{repo_name}/contents/.gitattributes"
+            response = requests.get(attr_url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                import base64
+                data = response.json()
+                content = base64.b64decode(data.get("content", "")).decode("utf-8", errors="ignore")
+                if "filter=lfs" in content:
+                    # Extract LFS-tracked file patterns
+                    lfs_patterns = []
+                    for line in content.splitlines():
+                        line = line.strip()
+                        if "filter=lfs" in line:
+                            # Pattern is the first part before "filter=lfs"
+                            pattern = line.split()[0] if line.split() else line
+                            lfs_patterns.append(pattern)
+                    return "; ".join(lfs_patterns) if lfs_patterns else "Yes"
+                else:
+                    return ""
+            elif response.status_code == 404:
+                return ""  # No .gitattributes = no LFS
+        except Exception as e:
+            logging.debug(f"Error checking LFS for {owner}/{repo_name}: {e}")
+
+        return ""
+
+    def get_repository_commit_count(self, owner: str, repo_name: str, default_branch: str) -> int:
+        """Get total number of commits on the default branch using REST API"""
+        if not default_branch:
+            return 0
+
+        token = self.pat_manager.get_current_token()
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        # Use the commits endpoint with per_page=1 and read total from Link header
+        url = f"{self.api_url}/repos/{owner}/{repo_name}/commits?sha={default_branch}&per_page=1"
+
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                # Parse the Link header to get the last page number = total commits
+                link_header = response.headers.get("Link", "")
+                if 'rel="last"' in link_header:
+                    # Extract last page number from: <...?page=1234>; rel="last"
+                    import re
+                    match = re.search(r'[&?]page=(\d+)>;\s*rel="last"', link_header)
+                    if match:
+                        return int(match.group(1))
+                # No Link header means only 1 page = check response length
+                data = response.json()
+                return len(data)
+            elif response.status_code == 409:
+                return 0  # Empty repository
+        except Exception as e:
+            logging.debug(f"Error fetching commit count for {owner}/{repo_name}: {e}")
+
+        return 0
+
     def get_repository_webhooks(self, owner: str, repo_name: str) -> int:
         """Get count of webhooks using REST API"""
         token = self.pat_manager.get_current_token()
@@ -661,6 +732,8 @@ class GitHubInventoryCollector:
             "Repo_Webhooks",
             "Repo_Runners",
             "GitHub_Apps",
+            "LFS_Files",
+            "Commits",
         ]
 
         with open(self.repo_csv_file, "w", newline="", encoding="utf-8") as csvfile:
@@ -729,6 +802,8 @@ class GitHubInventoryCollector:
             "Repo_Webhooks",
             "Repo_Runners",
             "GitHub_Apps",
+            "LFS_Files",
+            "Commits",
         ]
 
         with open(self.repo_csv_file, "a", newline="", encoding="utf-8") as csvfile:
@@ -860,6 +935,9 @@ class GitHubInventoryCollector:
                     apps_count = self.get_installed_apps(owner, repo_name)
                     repo_size = self.get_repository_size(owner, repo_name)
                     runners_count = self.get_repository_runners(owner, repo_name)
+                    lfs_usage = self.get_repository_lfs_usage(owner, repo_name)
+                    default_branch = repo["defaultBranchRef"]["name"] if repo.get("defaultBranchRef") else ""
+                    commit_count = self.get_repository_commit_count(owner, repo_name, default_branch)
 
                     # Compile inventory record
                     inventory_record = {
@@ -876,11 +954,7 @@ class GitHubInventoryCollector:
                         "Updated_At": repo["updatedAt"],
                         "Pushed_At": repo.get("pushedAt", ""),
                         "Size_KB": repo_size,
-                        "Default_Branch": (
-                            repo["defaultBranchRef"]["name"]
-                            if repo.get("defaultBranchRef")
-                            else ""
-                        ),
+                        "Default_Branch": default_branch,
                         "Forks": repo.get("forkCount", 0),
                         "Open_Issues": (
                             repo["issues"]["totalCount"] if repo.get("issues") else 0
@@ -905,6 +979,8 @@ class GitHubInventoryCollector:
                         "Repo_Webhooks": webhooks_count,
                         "Repo_Runners": runners_count,
                         "GitHub_Apps": apps_count,
+                        "LFS_Files": lfs_usage,
+                        "Commits": commit_count,
                     }
 
                     # Append to in-memory list and write to CSV immediately
@@ -925,6 +1001,8 @@ class GitHubInventoryCollector:
                         print(f"  [OK] Workflows: {workflows_count}")
                     if webhooks_count > 0:
                         print(f"  [OK] Webhooks: {webhooks_count}")
+                    if lfs_usage:
+                        print(f"  [OK] LFS: {lfs_usage}")
                     if repo["branches"]["totalCount"] > 1:
                         print(f"  [OK] Branches: {repo['branches']['totalCount']}")
 
@@ -1010,6 +1088,8 @@ class GitHubInventoryCollector:
             "Repo_Webhooks",
             "Org_Webhooks",
             "GitHub_Apps",
+            "LFS_Files",
+            "Commits",
         ]
 
         with open(filename, "w", newline="", encoding="utf-8") as csvfile:
@@ -1031,7 +1111,8 @@ class GitHubInventoryCollector:
 
         total_repos = len(self.inventory_data)
         total_workflows = sum(r["Workflows"] for r in self.inventory_data)
-        total_webhooks = sum(r["Repo_Webhooks"] for r in self.inventory_data)
+        total_repo_webhooks = sum(r["Repo_Webhooks"] for r in self.inventory_data)
+        total_org_webhooks = sum(r.get("Org_Webhooks", 0) for r in self.org_summary_data)
         total_branches = sum(r["Branches"] for r in self.inventory_data)
         total_apps = sum(r["GitHub_Apps"] for r in self.inventory_data)
         total_prs = sum(r["Pull_Requests"] for r in self.inventory_data)
@@ -1040,6 +1121,8 @@ class GitHubInventoryCollector:
         internal_repos = sum(1 for r in self.inventory_data if r["Is_Internal"])
         public_repos = sum(1 for r in self.inventory_data if r["Is_Public"])
         archived_repos = sum(1 for r in self.inventory_data if r["Is_Archived"])
+        total_commits = sum(r.get("Commits", 0) for r in self.inventory_data)
+        lfs_repos = sum(1 for r in self.inventory_data if r.get("LFS_Files"))
 
         # Log summary statistics
         logging.info("=" * 60)
@@ -1050,11 +1133,14 @@ class GitHubInventoryCollector:
         logging.info(f"Public Repositories: {public_repos}")
         logging.info(f"Archived Repositories: {archived_repos}")
         logging.info(f"Total Branches: {total_branches}")
+        logging.info(f"Total Commits: {total_commits}")
         logging.info(f"Total Workflows: {total_workflows}")
-        logging.info(f"Total Webhooks: {total_webhooks}")
+        logging.info(f"Repo Webhooks: {total_repo_webhooks}")
+        logging.info(f"Org Webhooks: {total_org_webhooks}")
         logging.info(f"Total GitHub Apps: {total_apps}")
         logging.info(f"Total Pull Requests: {total_prs}")
         logging.info(f"Total Open Issues: {total_issues}")
+        logging.info(f"LFS Repositories: {lfs_repos}")
         logging.info("=" * 60)
 
         print("\n" + "=" * 60)
@@ -1066,11 +1152,14 @@ class GitHubInventoryCollector:
         print(f"Public Repositories:       {public_repos:,}")
         print(f"Archived Repositories:     {archived_repos:,}")
         print(f"Total Branches:            {total_branches:,}")
+        print(f"Total Commits:             {total_commits:,}")
         print(f"Total Workflows:           {total_workflows:,}")
-        print(f"Total Webhooks:            {total_webhooks:,}")
+        print(f"Repo Webhooks:             {total_repo_webhooks:,}")
+        print(f"Org Webhooks:              {total_org_webhooks:,}")
         print(f"Total GitHub Apps:         {total_apps:,}")
         print(f"Total Pull Requests:       {total_prs:,}")
         print(f"Total Open Issues:         {total_issues:,}")
+        print(f"LFS Repositories:          {lfs_repos:,}")
         print("=" * 60 + "\n")
 
 
